@@ -7,15 +7,6 @@
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 #
 
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 
 from __future__ import annotations
@@ -47,6 +38,7 @@ class PlatformEnum(str, Enum):
     WEIBO = "wb"
     TIEBA = "tieba"
     ZHIHU = "zhihu"
+    ZUJUAN = "zujuan"
 
 
 class LoginTypeEnum(str, Enum):
@@ -162,7 +154,7 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             PlatformEnum,
             typer.Option(
                 "--platform",
-                help="Media platform selection (xhs=XiaoHongShu | dy=Douyin | ks=Kuaishou | bili=Bilibili | wb=Weibo | tieba=Baidu Tieba | zhihu=Zhihu)",
+                help="Media platform selection (xhs=XiaoHongShu | dy=Douyin | ks=Kuaishou | bili=Bilibili | wb=Weibo | tieba=Baidu Tieba | zhihu=Zhihu | zujuan=Zujuan question bank)",
                 rich_help_panel="Basic Configuration",
             ),
         ] = _coerce_enum(PlatformEnum, config.PLATFORM, PlatformEnum.XHS),
@@ -384,6 +376,9 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 ]
             elif platform == PlatformEnum.ZHIHU:
                 config.ZHIHU_SPECIFIED_ID_LIST = specified_id_list
+            elif platform == PlatformEnum.ZUJUAN:
+                # 组卷网按列表页 URL 抓题，--specified_id 传的是列表页 URL
+                config.ZUJUAN_SPECIFIED_URL_LIST = specified_id_list
 
         if creator_id_list:
             if platform == PlatformEnum.XHS:

@@ -6,16 +6,6 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 #
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
-#
 # 教学版说明：为防止爬取到的用户个人信息被用于定位真人并私信骚扰，
 # 本 ORM 不再持久化任何可识别用户的字段（用户 ID、IP 归属地、头像、
 # 主页链接、签名、性别等一律不落库）。原始用户 ID 在提取层经
@@ -299,5 +289,33 @@ class ZhihuComment(Base):
     content_type = Column(Text, comment='内容类型')
     creator_hash = Column(String(64), index=True, comment='创作者匿名哈希')
     user_nickname = Column(Text, comment='用户昵称(已脱敏)')
+    add_ts = Column(BigInteger, comment='添加时间戳')
+    last_modify_ts = Column(BigInteger, comment='最后修改时间戳')
+
+class ZujuanQuestion(Base):
+    __tablename__ = 'zujuan_question'
+    id = Column(Integer, primary_key=True, comment='主键ID')
+    question_id = Column(String(64), index=True, comment='题目ID')
+    bank_id = Column(String(32), comment='题库ID')
+    question_type = Column(String(64), comment='题型')
+    difficulty_name = Column(String(64), comment='难度名称')
+    difficulty_value = Column(String(32), comment='难度系数')
+    category_id = Column(String(64), index=True, comment='知识点ID')
+    category_name = Column(Text, comment='知识点名称')
+    knowledge_points = Column(Text, comment='全部知识点')
+    title = Column(Text, comment='来源标题')
+    content_html = Column(Text, comment='题干HTML')
+    content_text = Column(Text, comment='题干纯文本')
+    option_list = Column(Text, comment='选项列表JSON')
+    image_list = Column(Text, comment='公式/插图URL')
+    answer = Column(Text, comment='答案(未登录为空)')
+    analysis = Column(Text, comment='解析(未登录为空)')
+    source_name = Column(Text, comment='题目出处')
+    source_url = Column(Text, comment='出处试卷链接')
+    used_count = Column(String(64), comment='组卷次数')
+    update_label = Column(String(64), comment='更新时间标签')
+    detail_url = Column(Text, comment='详情页链接')
+    list_url = Column(Text, comment='来源列表页URL')
+    page = Column(Integer, comment='所在列表页页码')
     add_ts = Column(BigInteger, comment='添加时间戳')
     last_modify_ts = Column(BigInteger, comment='最后修改时间戳')

@@ -5,23 +5,13 @@
 # Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/tools/file_header_manager.py
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 """
 File header copyright declaration management tool
 
 Features:
-- Automatically add standardized copyright declaration and disclaimer to Python files
-- Intelligently detect existing file headers (encoding declaration, author info, disclaimer, etc.)
+- Automatically add standardized copyright declaration to Python files
+- Intelligently detect existing file headers (encoding declaration, author info, etc.)
 - Insert copyright info at appropriate position without breaking existing content
 - Support batch processing and single file check mode
 """
@@ -38,16 +28,6 @@ EMAIL = "relakkes@gmail.com"
 COPYRIGHT_YEAR = "2025"
 LICENSE_TYPE = "NON-COMMERCIAL LEARNING LICENSE 1.1"
 
-# Disclaimer standard text
-DISCLAIMER = """# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。"""
 
 
 def get_file_relative_path(file_path: str, project_root: str) -> str:
@@ -81,8 +61,7 @@ def generate_copyright_header(relative_path: str) -> str:
 # This file is part of MediaCrawler project.
 # Repository: {file_url}
 # GitHub: {GITHUB_PROFILE}
-# Licensed under {LICENSE_TYPE}
-#"""
+# Licensed under {LICENSE_TYPE}"""
 
     return header
 
@@ -99,19 +78,6 @@ def has_copyright_header(content: str) -> bool:
     """
     # Check if contains Copyright keyword
     return "Copyright (c)" in content and "MediaCrawler project" in content
-
-
-def has_disclaimer(content: str) -> bool:
-    """
-    Check if file already contains disclaimer
-
-    Args:
-        content: File content
-
-    Returns:
-        True if already contains disclaimer
-    """
-    return "声明：本代码仅供学习和研究目的使用" in content
 
 
 def find_insert_position(lines: List[str]) -> Tuple[int, bool]:
@@ -186,10 +152,6 @@ def process_file(file_path: str, project_root: str, dry_run: bool = False) -> Tu
 
         # Add copyright header
         new_lines.append(copyright_header + "\n")
-
-        # Add disclaimer if file doesn't have one
-        if not has_disclaimer(content):
-            new_lines.append(DISCLAIMER + "\n")
 
         # Add empty line (if next line is not empty)
         if insert_pos < len(lines) and lines[insert_pos].strip():
