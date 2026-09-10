@@ -11,6 +11,16 @@
 
 import os
 
+from dotenv import load_dotenv
+
+# 项目根目录的 .env 一直没人加载过（依赖装了、.env.example 也有，但没有任何一处
+# 调用 load_dotenv），导致 .env 里填的连接信息其实不生效。这里补上。
+# override=False：真实环境变量优先，方便 CI / 容器里覆盖
+load_dotenv(
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
+    override=False,
+)
+
 # mysql config
 MYSQL_DB_PWD = os.getenv("MYSQL_DB_PWD", "123456")
 MYSQL_DB_USER = os.getenv("MYSQL_DB_USER", "root")

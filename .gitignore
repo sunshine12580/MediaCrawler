@@ -184,3 +184,5 @@ debug_tools
 
 database/*.db
 .omx/
+# 数据库巡检快照：含 RDS 地址与授权信息，不入库
+docs/zujuan/db_snapshot.txt

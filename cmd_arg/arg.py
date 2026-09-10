@@ -324,6 +324,31 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 rich_help_panel="Proxy Configuration",
             ),
         ] = config.STATIC_PROXY_URL,
+        max_pages_per_knowledge: Annotated[
+            int,
+            typer.Option(
+                "--max_pages_per_knowledge",
+                help="[zujuan] Shallow sweep: max pages per knowledge point, 0 = unlimited",
+                rich_help_panel="ZuJuan Configuration",
+            ),
+        ] = config.ZUJUAN_MAX_PAGES_PER_KNOWLEDGE,
+        only_uncrawled: Annotated[
+            str,
+            typer.Option(
+                "--only_uncrawled",
+                help="[zujuan] Only pick knowledge points never crawled (scrape_status='none')",
+                rich_help_panel="ZuJuan Configuration",
+                show_default=True,
+            ),
+        ] = str(config.ZUJUAN_ONLY_UNCRAWLED),
+        exclude_paths: Annotated[
+            str,
+            typer.Option(
+                "--exclude_paths",
+                help="[zujuan] Exclude whole branches by keyword in knowledge_tree.path, comma separated",
+                rich_help_panel="ZuJuan Configuration",
+            ),
+        ] = ",".join(config.ZUJUAN_EXCLUDE_PATHS or []),
     ) -> SimpleNamespace:
         """MediaCrawler 命令行入口"""
 
@@ -332,6 +357,12 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         enable_headless = _to_bool(headless)
         enable_ip_proxy_value = _to_bool(enable_ip_proxy)
         init_db_value = init_db.value if init_db else None
+
+        config.ZUJUAN_MAX_PAGES_PER_KNOWLEDGE = max_pages_per_knowledge
+        config.ZUJUAN_ONLY_UNCRAWLED = _to_bool(only_uncrawled)
+        config.ZUJUAN_EXCLUDE_PATHS = [
+            item.strip() for item in (exclude_paths or "").split(",") if item.strip()
+        ]
 
         # Parse specified_id and creator_id into lists
         specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []
@@ -377,8 +408,16 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             elif platform == PlatformEnum.ZHIHU:
                 config.ZHIHU_SPECIFIED_ID_LIST = specified_id_list
             elif platform == PlatformEnum.ZUJUAN:
-                # 组卷网按列表页 URL 抓题，--specified_id 传的是列表页 URL
-                config.ZUJUAN_SPECIFIED_URL_LIST = specified_id_list
+                # 组卷网有两种抓法，按传进来的东西长什么样自动分流：
+                #   zsd 开头 -> 知识点 ID（按知识点抓，走 knowledge_tree 进度）
+                #   其它     -> 列表页 URL（按 URL 抓）
+                knowledge_ids = [i for i in specified_id_list if i.startswith("zsd")]
+                if knowledge_ids:
+                    config.ZUJUAN_KNOWLEDGE_ID_LIST = knowledge_ids
+                    config.ZUJUAN_CRAWL_MODE = "knowledge"
+                else:
+                    config.ZUJUAN_SPECIFIED_URL_LIST = specified_id_list
+                    config.ZUJUAN_CRAWL_MODE = "url"
 
         if creator_id_list:
             if platform == PlatformEnum.XHS:

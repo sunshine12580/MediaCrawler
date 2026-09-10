@@ -53,7 +53,9 @@ def get_async_engine(db_type: str = None):
     if db_type == "sqlite":
         db_url = f"sqlite+aiosqlite:///{sqlite_db_config['db_path']}"
     elif db_type == "mysql" or db_type == "db":
-        db_url = f"mysql+asyncmy://{mysql_db_config['user']}:{mysql_db_config['password']}@{mysql_db_config['host']}:{mysql_db_config['port']}/{mysql_db_config['db_name']}"
+        # 显式声明 utf8mb4：数学题里 4 字节字符是常态，而服务端默认字符集
+        # 可能还是 utf8mb3，不能赌驱动的默认值
+        db_url = f"mysql+asyncmy://{mysql_db_config['user']}:{mysql_db_config['password']}@{mysql_db_config['host']}:{mysql_db_config['port']}/{mysql_db_config['db_name']}?charset=utf8mb4"
     elif db_type == "postgres":
         db_url = f"postgresql+asyncpg://{postgres_db_config['user']}:{postgres_db_config['password']}@{postgres_db_config['host']}:{postgres_db_config['port']}/{postgres_db_config['db_name']}"
     else:

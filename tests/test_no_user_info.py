@@ -33,8 +33,15 @@ MASK_RE = re.compile(r"^.?\*{1,4}.?$")
 def test_orm_has_no_forbidden_columns():
     import database.models as m
     from sqlalchemy.orm import class_mapper
-    tables = [c for c in dir(m) if c[0].isupper()
-              and c not in ("Base", "Column", "Integer", "BigInteger", "String", "Text")]
+    # 按"是不是 Base 的子类"筛，而不是按名字排除 SQLAlchemy 的类型类 ——
+    # 名单法每次 models.py 多 import 一个列类型（Float 等）就会误判
+    tables = [
+        name for name in dir(m)
+        if isinstance(getattr(m, name), type)
+        and issubclass(getattr(m, name), m.Base)
+        and getattr(m, name) is not m.Base
+    ]
+    assert tables, "没有发现任何 ORM 模型，筛选条件可能失效了"
     bad = []
     for t in tables:
         cols = {c.name for c in class_mapper(getattr(m, t)).columns}

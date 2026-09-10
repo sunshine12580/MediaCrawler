@@ -6,52 +6,95 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
-# @Desc    : 组卷网存储入口
+"""
+组卷网存储分发
+
+和其它平台不同的是这里是**双写**：每道题先写一份原始 JSONL 快照（含整张卡片原文，
+供以后离线重解析），再按 SAVE_DATA_OPTION 写结构化存储。快照的日期决定
+questions.raw_day，所以顺序不能反。
+"""
+
+from typing import Optional
+
 import config
 from base.base_crawler import AbstractStore
-from model.m_zujuan import ZujuanQuestion as ZujuanQuestionItem
+from model.m_zujuan import ZujuanQuestion
 from tools import utils
 
-from ._store_impl import *
+from ._store_impl import (
+    ZuJuanCsvStoreImplement,
+    ZuJuanDbStoreImplement,
+    ZuJuanJsonStoreImplement,
+    ZuJuanRawJsonlStoreImplement,
+    ZuJuanSqliteStoreImplement,
+    now_iso,
+)
+
+# 分片状态要在整个进程里共享，不能每道题新建一个
+_raw_store: Optional[ZuJuanRawJsonlStoreImplement] = None
+
+
+def get_raw_store() -> ZuJuanRawJsonlStoreImplement:
+    global _raw_store
+    if _raw_store is None:
+        _raw_store = ZuJuanRawJsonlStoreImplement()
+    return _raw_store
 
 
 class ZuJuanStoreFactory:
     STORES = {
         "csv": ZuJuanCsvStoreImplement,
-        "db": ZuJuanDbStoreImplement,
-        "postgres": ZuJuanDbStoreImplement,
         "json": ZuJuanJsonStoreImplement,
-        "jsonl": ZuJuanJsonlStoreImplement,
+        "jsonl": ZuJuanRawJsonlStoreImplement,
+        "db": ZuJuanDbStoreImplement,
+        "mysql": ZuJuanDbStoreImplement,
+        "postgres": ZuJuanDbStoreImplement,
         "sqlite": ZuJuanSqliteStoreImplement,
-        "mongodb": ZuJuanMongoStoreImplement,
-        "excel": ZuJuanExcelStoreImplement,
     }
 
     @staticmethod
     def create_store() -> AbstractStore:
-        store_class = ZuJuanStoreFactory.STORES.get(config.SAVE_DATA_OPTION)
+        save_option = config.SAVE_DATA_OPTION
+        if save_option == "jsonl":
+            # 原始快照本来就一直在写，别再重复写一份
+            return get_raw_store()
+        store_class = ZuJuanStoreFactory.STORES.get(save_option)
         if not store_class:
             raise ValueError(
-                "[ZuJuanStoreFactory.create_store] Invalid save option only supported csv or db or json or jsonl or sqlite or mongodb or excel ..."
+                f"[ZuJuanStoreFactory.create_store] 组卷网不支持 --save_data_option {save_option}，"
+                f"可选：{' / '.join(sorted(ZuJuanStoreFactory.STORES))}。"
+                " 知识点和来源试卷是多对多数据，只有 db/sqlite/postgres（关联表）"
+                "和 jsonl（原始快照）能完整表达"
             )
         return store_class()
 
 
-async def update_zujuan_question(question_item: ZujuanQuestionItem):
+async def update_zujuan_question(question: ZujuanQuestion):
     """
-    保存一道组卷网题目
+    保存一道组卷网题目：原始 JSONL 快照 + 结构化存储。
+
     Args:
-        question_item: 题目数据模型
-
-    Returns:
-
+        question: 解析出来的题目模型
     """
-    save_question_item = question_item.model_dump()
-    now_ts = utils.get_current_timestamp()
-    save_question_item.update({"add_ts": now_ts, "last_modify_ts": now_ts})
+    question.grade = getattr(config, "ZUJUAN_GRADE", "middle")
+    question.captured_at = now_iso()
+
+    write_raw = getattr(config, "ZUJUAN_ENABLE_RAW_JSONL", True)
+    if write_raw:
+        raw_store = get_raw_store()
+        # 先定下写哪个分片，raw_day 要跟着一起入库
+        question.raw_day = raw_store.raw_day
+        await raw_store.store_content(question)
+
     utils.logger.info(
-        f"[store.zujuan.update_zujuan_question] question_id: {save_question_item.get('question_id')}, "
-        f"type: {save_question_item.get('question_type')}, "
-        f"content: {save_question_item.get('content_text', '')[:60]}"
+        f"[store.zujuan.update_zujuan_question] question_id: {question.question_id}, "
+        f"qtype: {question.qtype_full or question.qtype}, "
+        f"difficulty: {question.difficulty}({question.score_rate}), "
+        f"knowledge: {question.knowledge_id}, raw_day: {question.raw_day}"
     )
-    await ZuJuanStoreFactory.create_store().store_content(save_question_item)
+
+    store = ZuJuanStoreFactory.create_store()
+    if write_raw and isinstance(store, ZuJuanRawJsonlStoreImplement):
+        # SAVE_DATA_OPTION=jsonl 且快照已开：上面那一次写就是全部产出
+        return
+    await store.store_content(question)

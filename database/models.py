@@ -14,7 +14,7 @@
 # 创作者个人档案表（XhsCreator/DyCreator/WeiboCreator/TiebaCreator/
 # ZhihuCreator/BilibiliUpInfo/BilibiliContactInfo）已整体移除。
 
-from sqlalchemy import create_engine, Column, Integer, Text, String, BigInteger
+from sqlalchemy import create_engine, Column, Integer, Text, String, BigInteger, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -292,30 +292,147 @@ class ZhihuComment(Base):
     add_ts = Column(BigInteger, comment='添加时间戳')
     last_modify_ts = Column(BigInteger, comment='最后修改时间戳')
 
+# ---------------------------------------------------------------------------
+# 组卷网：映射到题库已有的三张表（questions / question_knowledge / question_sources）
+#
+# ★ questions 是一张多阶段共享的大表（56 列）：抓取、答案、离线渲染各写各的列。
+#   这里**只声明抓取阶段负责的列** —— SQLAlchemy 永远不会碰模型里没声明的列，
+#   于是"绝不能覆盖 answer_img / stem_md / render_status 等其它阶段产物"这条纪律
+#   就从结构上得到保证，而不是靠写代码时记得躲开。
+#
+# ★ stem_text 也故意不声明：实测库里 1/2000 非空，且它的口径是离线产物
+#   （公式要裸 LaTeX、插图要 [图N] 占位），抓取阶段产不出来，写了反而会让
+#   离线阶段分不清"还没加工"和"已加工"。
+#
+# ★ 这三张表由 docs/zujuan/题干入库规范.md 的 DDL 手工建好，不走 create_all，
+#   所以这里的列定义不完整不影响建表（见 main.py 里 zujuan 跳过自动建表）。
+# ---------------------------------------------------------------------------
+
+
 class ZujuanQuestion(Base):
-    __tablename__ = 'zujuan_question'
-    id = Column(Integer, primary_key=True, comment='主键ID')
-    question_id = Column(String(64), index=True, comment='题目ID')
-    bank_id = Column(String(32), comment='题库ID')
-    question_type = Column(String(64), comment='题型')
-    difficulty_name = Column(String(64), comment='难度名称')
-    difficulty_value = Column(String(32), comment='难度系数')
-    category_id = Column(String(64), index=True, comment='知识点ID')
-    category_name = Column(Text, comment='知识点名称')
-    knowledge_points = Column(Text, comment='全部知识点')
-    title = Column(Text, comment='来源标题')
-    content_html = Column(Text, comment='题干HTML')
-    content_text = Column(Text, comment='题干纯文本')
-    option_list = Column(Text, comment='选项列表JSON')
-    image_list = Column(Text, comment='公式/插图URL')
-    answer = Column(Text, comment='答案(未登录为空)')
-    analysis = Column(Text, comment='解析(未登录为空)')
-    source_name = Column(Text, comment='题目出处')
-    source_url = Column(Text, comment='出处试卷链接')
-    used_count = Column(String(64), comment='组卷次数')
-    update_label = Column(String(64), comment='更新时间标签')
-    detail_url = Column(Text, comment='详情页链接')
-    list_url = Column(Text, comment='来源列表页URL')
-    page = Column(Integer, comment='所在列表页页码')
-    add_ts = Column(BigInteger, comment='添加时间戳')
-    last_modify_ts = Column(BigInteger, comment='最后修改时间戳')
+    """题目主表（共享），只映射抓取阶段负责的 35 列"""
+
+    __tablename__ = 'questions'
+    question_id = Column(String(64), primary_key=True, comment='题目ID')
+    grade = Column(String(8), comment='学段：middle=初中 / high=高中')
+    bank_id = Column(String(16), comment='题库编号，初中数学=2')
+
+    stem_html = Column(Text, comment='题干HTML，已剥位置号')
+    stem_status = Column(String(16), comment='题干进度：none / html_saved')
+    stem_hash = Column(String(32), comment='stem_html 的 md5，重复抓取判重用')
+
+    qtype = Column(String(32), comment='题型大类')
+    qtype_code = Column(String(16), comment='题型码')
+    qtype_full = Column(String(32), comment='完整题型，如 解答题-计算题')
+    qtype_sub = Column(String(16), comment='题型子类型')
+
+    difficulty = Column(String(16), comment='5档难度名')
+    difficulty_code = Column(String(8), comment='5档难度码')
+    difficulty_band = Column(String(8), comment='3档难度，由 score_rate 重算')
+    score_rate = Column(Float, comment='得分率')
+
+    source = Column(Text, comment='来源试卷全名')
+    title_abbr = Column(String(128), comment='三段式简称原串')
+    category_id = Column(String(16), comment='所属章节ID')
+    category_name = Column(String(64), comment='所属章节名')
+
+    school_year = Column(String(16), comment='学年，如 2025-2026')
+    year = Column(Integer, comment='年份')
+    grade_level = Column(String(16), comment='年级')
+    term = Column(String(16), comment='学期')
+    province = Column(String(16), comment='省份')
+    province_code = Column(String(8), comment='省级行政区划码')
+    city = Column(String(32), comment='地级市，直辖市为空')
+    source_type = Column(String(32), comment='来源类型')
+
+    paper_id = Column(String(32), comment='主来源试卷ID')
+    used_count = Column(Integer, comment='被组卷引用次数')
+    is_famous_school = Column(Integer, comment='名校角标 1/0')
+    is_real_exam = Column(Integer, comment='真题角标 1/0')
+
+    list_url = Column(Text, comment='这道题是在哪个列表页抓到的')
+    knowledge_id = Column(String(32), comment='主知识点ID')
+    knowledge_tags = Column(Text, comment='全部知识点名称的JSON数组')
+
+    raw_day = Column(String(10), comment='原始JSONL落在哪一天的文件')
+    first_seen_at = Column(String(32), comment='第一次见到这道题的时刻，只在INSERT时写')
+
+
+class ZujuanQuestionKnowledge(Base):
+    """一题多知识点关联表，解析产物，先删后插"""
+
+    __tablename__ = 'question_knowledge'
+    question_id = Column(String(64), primary_key=True, comment='题目ID')
+    knowledge_id = Column(String(32), primary_key=True, comment='知识点ID')
+    knowledge_name = Column(String(128), comment='知识点名称')
+    ord = Column(Integer, comment='卡片上的先后顺序，0 是主知识点')
+
+
+class ZujuanQuestionSource(Base):
+    """一题多来源试卷关联表，解析产物，先删后插"""
+
+    __tablename__ = 'question_sources'
+    question_id = Column(String(64), primary_key=True, comment='题目ID')
+    paper_id = Column(String(32), primary_key=True, comment='来源试卷ID')
+    paper_title = Column(Text, comment='试卷全名')
+    ord = Column(Integer, comment='顺序，0 是卡片上显示的主来源')
+
+
+# ---------------------------------------------------------------------------
+# 知识点树与切片进度
+#
+# knowledge_tree 同样是共享表：树结构那一组列（node_id / title / parent_id /
+# level / path / href / is_knowledge / child_count / sort_ord / updated_at）
+# 归"知识点树同步"那条线，抓题这条线只写进度列。这里为了能读树结构把两组列
+# 都声明了，写入侧的纪律由 store/zujuan/_progress.py 的 TREE_PROGRESS_COLUMNS
+# 白名单强制保证 —— 任何一次 UPDATE 只要出现结构列就直接抛错。
+# ---------------------------------------------------------------------------
+
+
+class ZujuanKnowledgeTree(Base):
+    """知识点树快照 + 每个知识点的采集进度"""
+
+    __tablename__ = 'knowledge_tree'
+
+    # ---- 第一组：树结构，只读不写 ----
+    knowledge_id = Column(String(32), primary_key=True, comment='知识点ID，带 zsd 前缀')
+    node_id = Column(String(32), comment='树JSON里的原始数字ID，不带前缀')
+    bank_id = Column(String(16), comment='学科库编号，初中数学=2')
+    title = Column(String(128), comment='知识点名称')
+    parent_id = Column(String(32), comment='父节点knowledge_id')
+    level = Column(Integer, comment='层级，根=0')
+    path = Column(String(512), comment='从根到本节点的标题路径')
+    href = Column(String(128), comment='站点链接 /czsx/zsd4700')
+    is_knowledge = Column(Integer, comment='站点的isKnowledge标记')
+    child_count = Column(Integer, comment='直接子节点数，0表示叶子')
+    sort_ord = Column(Integer, comment='同级里的顺序')
+    updated_at = Column(String(32), comment='树最后一次同步时刻')
+
+    # ---- 第二组：采集进度，本项目负责写 ----
+    is_leaf = Column(Integer, comment='是不是叶子节点，只有叶子才抓')
+    scrape_status = Column(String(16), comment='none/partial/slicing/done/capped/empty')
+    site_total = Column(Integer, comment='站点说这个知识点有多少道题')
+    collected = Column(Integer, comment='库里这个知识点有多少道题，必须重算不能累加')
+    last_page = Column(Integer, comment='上次采到第几页')
+    covered_pages = Column(Text, comment='已经采过的页码区间，如 1-40,88-120')
+    scraped_at = Column(String(32), comment='上次采集时刻')
+    note = Column(String(255), comment='人话备注')
+
+
+class ZujuanKnowledgeSlice(Base):
+    """题多到翻页翻不完的知识点，按筛选条件切开之后每一片的进度"""
+
+    __tablename__ = 'knowledge_slice'
+
+    knowledge_id = Column(String(32), primary_key=True, comment='知识点ID，带 zsd 前缀')
+    slice_key = Column(String(32), primary_key=True, comment='切片标识，如 t4d1s1')
+    dim = Column(String(16), comment='按哪一维切出来的：qtype/difficulty/sub_type/year')
+    slice_name = Column(String(64), comment='人话名字，如 解答题·容易·计算题')
+    depth = Column(Integer, comment='维度在级联里的序号：qtype=1 difficulty=2 sub_type=3 year=4')
+    scrape_status = Column(String(16), comment='none/partial/slicing/done/capped/empty')
+    site_total = Column(Integer, comment='站点说这一片有多少道题')
+    collected = Column(Integer, comment='库里这一片有多少道题，必须重算不能累加')
+    last_page = Column(Integer, comment='这一片上次采到第几页')
+    covered_pages = Column(Text, comment='这一片已经采过的页码区间')
+    scraped_at = Column(String(32), comment='上次采集时刻')
+    note = Column(String(255), comment='人话备注')

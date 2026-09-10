@@ -99,8 +99,14 @@ async def main() -> None:
         print(f"Database {args.init_db} initialized successfully.")
         return
 
-    # 数据库保存模式下自动建表，避免首次运行时出现 no such table 错误
-    if config.SAVE_DATA_OPTION in ("sqlite", "mysql", "db", "postgres"):
+    # 数据库保存模式下自动建表，避免首次运行时出现 no such table 错误。
+    # ★组卷网例外：它写的是外部已有的题库表（questions / question_knowledge /
+    #   question_sources），表由 docs/zujuan/schema.sql 手工建好。这里若跑自动建表，
+    #   Base.metadata 里另外 15 张平台表会被凭空建进人家的生产库。
+    skip_create = config.PLATFORM == "zujuan" and not getattr(
+        config, "ZUJUAN_AUTO_CREATE_TABLES", False
+    )
+    if config.SAVE_DATA_OPTION in ("sqlite", "mysql", "db", "postgres") and not skip_create:
         await db.init_db(config.SAVE_DATA_OPTION)
 
     crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
