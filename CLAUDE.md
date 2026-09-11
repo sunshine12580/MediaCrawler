@@ -73,7 +73,7 @@ npm run docs:dev                                   # VitePress 文档（根目�
 - 写入前先查 `stem_hash`，非空就整题跳过（连关联表都不动）；`first_seen_at` 只在 INSERT 时写一次。`build_question_row()` 会丢掉所有 None 和空串但**保留 0**（`is_famous_school=0` 是"确认没有名校角标"）。
 - 两张关联表先删后插，三处写入在同一个事务里；知识点要按 id 去重后重新连续编号 `ord` —— 卡片末尾的"能力标签"抠出的 id 会和前面的知识点撞车，而原始数组里那条重复项必须如实保留进 JSONL 和 `knowledge_tags`。
 - 表由 `docs/zujuan/schema.sql` 手工建好，`ZUJUAN_AUTO_CREATE_TABLES = False` 关掉了 `main.py` 的自动建表 —— 否则 `Base.metadata` 里另外 15 张平台表会被建进人家的生产库。
-- 每道题**双写**：先落一份含整张卡片原文的原始 JSONL（`data/raw/<日期>-n<序号>.jsonl`，满 2 万行换分片），再写数据库；`questions.raw_day` 记的就是那个日期，顺序不能反。
+- 每道题**双写**：先落一份含整张卡片原文的原始 JSONL（`data/raw/<日期>-<节点>-n<序号>.jsonl`，满 2 万行换分片），再写数据库；`questions.raw_day` 记的就是开头那个日期，顺序不能反。**文件名带节点**（`ZUJUAN_NODE_ID` / `--node_id`，留空取主机名）：多台机器同时跑时各自都从 n1 开始写，不带节点合到一个目录会互相覆盖，而 `raw_day` 是 varchar(10) 只装得下日期，库里看不出快照在哪台机器上。★ 节点只能进文件名、不能进记录本身 —— 题干解析规范 3.1 节写明"这个格式不能自己改"，原项目的离线工具直接吃这些文件。分片序号记在状态里，不从文件名反解（节点名里可能带 `-n`）。
 - 解析上几个反直觉的点：题干取 `div.exam-item__cnt` 的 **innerHTML** 并剥掉开头的位置号（那是"本页第几题"，不剥 `stem_hash` 每次都变）；`qtype_full` 只在正文第一个 `span.info-cnt` 里，按钮属性只有大类，所以**每次都要读**不是兜底；`difficulty_band` 是由 `score_rate` 重算的第三套 3 档编码，和按钮的 5 档数字会撞车；`sources` 只从 `div.more-src-links a` 收集（顶部那条摘要链接也在里面，单独再收会打乱顺序）。
 
 `tools/zujuan_db_inspect.py` 是只读巡检脚本，对照规范检查线上表结构、字符集和数据现状。

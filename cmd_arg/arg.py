@@ -365,6 +365,14 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 rich_help_panel="ZuJuan Configuration",
             ),
         ] = config.ZUJUAN_API_PAGE_BASE,
+        node_id: Annotated[
+            str,
+            typer.Option(
+                "--node_id",
+                help="[zujuan] Node name baked into raw JSONL file names (<date>-<node>-n1.jsonl); empty = hostname",
+                rich_help_panel="ZuJuan Configuration",
+            ),
+        ] = config.ZUJUAN_NODE_ID,
     ) -> SimpleNamespace:
         """MediaCrawler 命令行入口"""
 
@@ -381,6 +389,7 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         ]
         config.ZUJUAN_FETCH_MODE = (fetch_mode or "").strip().lower()
         config.ZUJUAN_API_PAGE_BASE = api_page_base
+        config.ZUJUAN_NODE_ID = (node_id or "").strip()
 
         # Parse specified_id and creator_id into lists
         specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []

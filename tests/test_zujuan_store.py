@@ -340,3 +340,107 @@ async def test_raw_jsonl_appends_to_existing_shard(tmp_path, monkeypatch):
     await another.store_content(make_question(question_id="2"))
     assert another._path == path
     assert len(open(path, encoding="utf-8").read().strip().splitlines()) == 2
+
+
+# ---------------------------------------------------------------------------
+# 多节点：原始快照文件名带节点
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_raw_jsonl_file_name_carries_node_id(tmp_path, monkeypatch):
+    """★ 两台机器同时跑，各自都从 n1 开始写。文件名不带节点的话，
+    合到一个目录就会互相覆盖 —— 而这是卡片原文唯一的完整副本"""
+    monkeypatch.setattr(config, "ZUJUAN_RAW_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "win10")
+    store = ZuJuanRawJsonlStoreImplement()
+    await store.store_content(make_question(question_id="1"))
+    (name,) = [p.name for p in tmp_path.iterdir()]
+    assert name == f"{store.raw_day}-win10-n1.jsonl"
+    # 日期必须留在最前面：questions.raw_day 靠它回查快照
+    assert name.startswith(store.raw_day)
+
+
+@pytest.mark.asyncio
+async def test_two_nodes_in_one_dir_never_share_a_file(tmp_path, monkeypatch):
+    """同一个目录里两个节点各写各的，谁也不往对方的分片里追加"""
+    monkeypatch.setattr(config, "ZUJUAN_RAW_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "win11")
+    a = ZuJuanRawJsonlStoreImplement()
+    await a.store_content(make_question(question_id="a"))
+
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "win10")
+    b = ZuJuanRawJsonlStoreImplement()
+    await b.store_content(make_question(question_id="b"))
+
+    assert a._path != b._path
+    assert len(open(a._path, encoding="utf-8").read().splitlines()) == 1
+    assert len(open(b._path, encoding="utf-8").read().splitlines()) == 1
+
+
+@pytest.mark.asyncio
+async def test_node_is_fixed_for_the_life_of_the_process(tmp_path, monkeypatch):
+    """首次写时定下节点，之后 config 再怎么变也不换文件 —— 半路换名会把
+    同一个进程的产出拆到两个节点名下"""
+    monkeypatch.setattr(config, "ZUJUAN_RAW_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "win11")
+    store = ZuJuanRawJsonlStoreImplement()
+    await store.store_content(make_question(question_id="1"))
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "something-else")
+    await store.store_content(make_question(question_id="2"))
+    (name,) = [p.name for p in tmp_path.iterdir()]
+    assert "-win11-" in name
+
+
+@pytest.mark.asyncio
+async def test_rollover_with_node_id_containing_dash_n(tmp_path, monkeypatch):
+    """★ 节点名里带 -n（win-node2）时分片序号不能被解析错。
+    旧代码用 rsplit("-n") 从文件名反解序号，碰上这种名字会炸或者跳号"""
+    monkeypatch.setattr(config, "ZUJUAN_RAW_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "ZUJUAN_RAW_SHARD_SIZE", 1)
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "win-node2")
+    store = ZuJuanRawJsonlStoreImplement()
+    for i in range(3):
+        await store.store_content(make_question(question_id=str(i)))
+    names = sorted(p.name for p in tmp_path.iterdir())
+    day = names[0][:10]
+    assert names == [f"{day}-win-node2-n{i}.jsonl" for i in (1, 2, 3)]
+
+
+@pytest.mark.asyncio
+async def test_resume_only_appends_to_own_node_shard(tmp_path, monkeypatch):
+    """重启后接着写，只认本节点的分片；目录里别的节点的文件一行都不碰"""
+    monkeypatch.setattr(config, "ZUJUAN_RAW_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "ZUJUAN_RAW_SHARD_SIZE", 10)
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "win10")
+    other = ZuJuanRawJsonlStoreImplement()
+    await other.store_content(make_question(question_id="x"))
+
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "win11")
+    first = ZuJuanRawJsonlStoreImplement()
+    await first.store_content(make_question(question_id="1"))
+    again = ZuJuanRawJsonlStoreImplement()
+    await again.store_content(make_question(question_id="2"))
+
+    assert again._path == first._path
+    assert len(open(first._path, encoding="utf-8").read().splitlines()) == 2
+    assert len(open(other._path, encoding="utf-8").read().splitlines()) == 1
+
+
+def test_node_id_defaults_to_hostname(monkeypatch):
+    """留空取主机名：忘了配也不会两台撞名"""
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "")
+    monkeypatch.setattr(_store_impl.socket, "gethostname", lambda: "DESKTOP-7H3K2LQ")
+    assert _store_impl.resolve_node_id() == "desktop-7h3k2lq"
+
+
+def test_node_id_is_sanitized(monkeypatch):
+    """节点名里的路径分隔符不能把文件写到别的目录去"""
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "../Win 11\\x")
+    node = _store_impl.resolve_node_id()
+    assert node == "win-11-x"
+    assert "/" not in node and "\\" not in node and not node.startswith(".")
+
+
+def test_node_id_never_empty(monkeypatch):
+    monkeypatch.setattr(config, "ZUJUAN_NODE_ID", "...")
+    assert _store_impl.resolve_node_id() == "node"

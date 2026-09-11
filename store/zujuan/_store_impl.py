@@ -22,6 +22,8 @@
 
 import json
 import os
+import re
+import socket
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -208,13 +210,35 @@ class ZuJuanSqliteStoreImplement(ZuJuanDbStoreImplement):
     """SQLite 与 MySQL 共用同一套 SQLAlchemy 实现"""
 
 
+_NODE_ID_UNSAFE_RE = re.compile(r"[^a-z0-9_.-]+")
+
+
+def resolve_node_id() -> str:
+    """本节点的标识，拼进原始 JSONL 的文件名：<日期>-<节点>-n<序号>.jsonl
+
+    多台机器同时跑时，各自的 data/raw/ 都从 n1 开始写，不带节点的话文件名一模一样；
+    questions.raw_day 是 varchar(10) 只装得下日期，库里看不出某道题的原始卡片在哪台
+    机器上。日后把几台的快照合到一个目录，同名文件会直接互相覆盖 —— 而这是卡片原文
+    唯一的完整副本。
+
+    ZUJUAN_NODE_ID 留空时取本机主机名，忘了配也不会撞名。只保留 [a-z0-9_.-]：
+    路径分隔符之类的字符一律替换掉，免得节点名把文件写到别的目录去。
+    """
+    raw = (getattr(config, "ZUJUAN_NODE_ID", "") or "").strip() or socket.gethostname()
+    node = _NODE_ID_UNSAFE_RE.sub("-", raw.lower()).strip("-.")
+    return node or "node"
+
+
 class ZuJuanRawJsonlStoreImplement(AbstractStore):
     """
     原始 JSONL 快照：一行一道题，保留整张卡片原文。
 
     格式严格照 docs/zujuan/题干解析规范.md 第 3.1 节，产出的文件可以直接被原项目的
-    离线工具吃掉。文件名 <YYYY-MM-DD>-n<序号>.jsonl，写满 ZUJUAN_RAW_SHARD_SIZE
-    行开下一个分片；questions.raw_day 记的就是这里的日期。
+    离线工具吃掉。文件名 <YYYY-MM-DD>-<节点>-n<序号>.jsonl，写满 ZUJUAN_RAW_SHARD_SIZE
+    行开下一个分片；questions.raw_day 记的就是开头的日期。
+
+    ★ 节点只进文件名，不进记录：3.1 节的格式是定死的，多一个键原项目的工具就可能吃不下。
+      日期必须留在最前面（raw_day 要和它一致），-n<序号>.jsonl 必须留在最后。
     """
 
     # meta 的键顺序照抄原程序的输出，方便两边文件直接 diff
@@ -252,7 +276,11 @@ class ZuJuanRawJsonlStoreImplement(AbstractStore):
     def __init__(self) -> None:
         self._raw_day: Optional[str] = None
         self._path: Optional[str] = None
+        self._index = 0
         self._lines = 0
+        # 首次写的时候才解析：命令行回写 config 发生在模块导入之后，
+        # 在这里读会拿到命令行生效之前的旧值
+        self._node: Optional[str] = None
 
     @classmethod
     def build_record(cls, question: ZujuanQuestion) -> Dict[str, Any]:
@@ -285,7 +313,8 @@ class ZuJuanRawJsonlStoreImplement(AbstractStore):
         定位当天该写哪个分片。
 
         进程启动后第一次写时扫一遍目录接着上次写；之后只在写满时递增，
-        不重复扫盘。跨天会自动换到新日期的 n1。
+        不重复扫盘。跨天会自动换到新日期的 n1。只认本节点的分片，
+        绝不往别的节点的文件里追加。
         """
         today = datetime.now().strftime("%Y-%m-%d")
         shard_size = int(getattr(config, "ZUJUAN_RAW_SHARD_SIZE", 20000))
@@ -295,28 +324,39 @@ class ZuJuanRawJsonlStoreImplement(AbstractStore):
 
         raw_dir = getattr(config, "ZUJUAN_RAW_DIR", "data/raw")
         os.makedirs(raw_dir, exist_ok=True)
+        if self._node is None:
+            self._node = resolve_node_id()
 
         if self._raw_day != today:
-            # 换天了（或首次写），从磁盘上已有的分片接着写
+            # 换天了（或首次写），从磁盘上本节点已有的分片接着写
             index = 1
             while True:
-                candidate = os.path.join(raw_dir, f"{today}-n{index}.jsonl")
+                candidate = self._shard_path(raw_dir, today, index)
                 if not os.path.exists(candidate):
                     break
                 with open(candidate, "r", encoding="utf-8") as f:
                     lines = sum(1 for _ in f)
                 if lines < shard_size:
-                    self._raw_day, self._path, self._lines = today, candidate, lines
+                    self._open_shard(today, candidate, index, lines)
                     return candidate
                 index += 1
-            self._raw_day, self._path, self._lines = today, candidate, 0
+            self._open_shard(today, candidate, index, 0)
             return candidate
 
-        # 当天写满了，开下一个分片
-        index = int(self._path.rsplit("-n", 1)[1].split(".")[0]) + 1
-        self._path = os.path.join(raw_dir, f"{today}-n{index}.jsonl")
-        self._lines = 0
-        return self._path
+        # 当天写满了，开下一个分片。★ 序号记在状态里而不是从文件名反解 ——
+        #   节点名里完全可能带 "-n"（win-node2），rsplit("-n") 会解析错
+        path = self._shard_path(raw_dir, today, self._index + 1)
+        self._open_shard(today, path, self._index + 1, 0)
+        return path
+
+    def _shard_path(self, raw_dir: str, day: str, index: int) -> str:
+        return os.path.join(raw_dir, f"{day}-{self._node}-n{index}.jsonl")
+
+    def _open_shard(self, day: str, path: str, index: int, lines: int) -> None:
+        self._raw_day, self._path, self._index, self._lines = day, path, index, lines
+        utils.logger.info(
+            f"[ZuJuanRawJsonl] 原始快照写入 {path}（节点 {self._node}，已有 {lines} 行）"
+        )
 
     @property
     def raw_day(self) -> str:
