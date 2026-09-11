@@ -131,6 +131,20 @@ npm run docs:dev                                   # VitePress 文档（根目�
 - **只带本域 Cookie**。`browser_context.cookies(urls=[ZUJUAN_HOST])` 必须带 `urls`；不带时 Playwright 返回整个上下文里所有域的 Cookie，CDP 接管的又是用户真实的 Chrome，那等于把用户其它网站的登录态发给组卷网，几十 KB 的 Cookie 头本身也是明显的异常特征。
 - **`sec-ch-ua` 用页面真实报的 `navigator.userAgentData.brands` 拼**，取不到就不发。Chrome 的品牌列表里有一项是每版都变的 GREASE 值，照 UA 里的版本号猜一套出来比不发这个头更像机器。同理 `Accept-Encoding` 只声明 `httpx._decoders.SUPPORTED_DECODERS` 里真能解的（没装 brotli 还声明 `br`，服务端真返回 br 时解出来是二进制乱码，会被 `page_status()` 判成 UNKNOWN 甚至空页）。
 
+### 组卷网 api 取页模式（`ZUJUAN_FETCH_MODE = "api"`）
+
+站点分页器点下去打的是 `POST /zujuan-api/question/list`，返回 `{"code":"0","data":{"html":..., "total":677}}`。`data.html` 是一段只含 `div.tk-quest-item` 的片段，**和整页渲染出来的卡片结构逐字节一致**，`ZuJuanExtractor` 不用改一行就能解析（`media_platform/zujuan/test_data/zujuan_api_list.json` 存了一份线上真实响应，`tests/test_zujuan_api.py` 拿它把 35 个字段全锁住了）。省掉渲染，每页只有 9 KB 左右。参数拼装和响应解析在 `media_platform/zujuan/api.py`，和 `slicing.py` 一样是纯函数。
+
+- **★ 唯一必须补的缺口：`site_total`。** `#questioncount`（"共计 N 道试题"）和 `div.tk-pager` 都是**页面外壳**，不在片段里，`extract_site_total()` 对它一律返回 `None` —— 而 `None` 在 `_page_through()` 里的含义是"这一趟没读到，保留 partial 下次重试"。照搬接口会让每个知识点在第 1 页就中断，一道题也采不到。题数改从 `data.total` 取。
+- **每一片的首页仍然走浏览器**，之后的页才走接口。那一趟本来就要做：过 WAF 挑战、刷新 Cookie、读防伪令牌、读 `#questioncount`，接口一样都给不了。一片动辄几百页，摊到每页的浏览器开销可以忽略，风控处置那一整套却原样保留了下来。
+- **`curPage` 是 1 基，而且是"要去的那一页"**（2026-09 实测）。线上抓到的请求里 `curPage=67` 配 Referer `o2p68` 看着像 0 基，实际是人停在第 68 页点了"67"那个页码 —— Referer 只是从哪儿来的。这条记录很容易看反。
+- **★ 用接口之前必须过对齐校验**（`core._api_aligned()`）：拿浏览器刚取到的那一页，用同一个页码再走一次接口，比题目 ID 列表和题数。页码基数已经证实了，**但 `quesType`/`quesDiff`/`quesYear` 的映射仍然是照 URL 段码推的、没验证过** —— 推错了不会报错，只会让筛选条件被忽略，把整个知识点的题当成某个分片入库（现象是接口返回的 `total` 等于知识点总数）。这才是这道校验现在真正在守的东西。校验不过就整轮关掉接口退回浏览器，慢但不写坏数据。代价是每片一次额外请求，不到 1%。
+- **维度码只有一份真相**：`api.py` 的三个 `*_value()` 直接从 `slicing.SliceValue` 取，不另抄一张表。子题型仍是**粘在题型码后面的两位**（`1103` + `05` = `110305`），和 `url_filter_segment()` 的拼法一致；难度是 URL 段码去掉 `d`；`y-1`（更早以前）→ `-1`。
+- **认不出一律返回 `None` 退回浏览器**，绝不当成"这一页没题"。被 WAF 拦下时接口返回的是 HTML 而不是 JSON，`parse_response()` 判成 None，令牌也一并丢弃下次重读；返回体里有验证码特征时照样抛 `CaptchaPageError` 走人工。空 `html` 配非零 `total` 是**合法**结果（翻过了最后一页），交给上层按页数判。
+- **`RequestVerification` 请求头和 `__RequestVerificationToken` Cookie 不是一个值**（ASP.NET Core 的防伪令牌是密码学配对的两半），只能用 `client.read_verification_token()` 从页面 DOM 里读，读不到就不许走接口。人过完验证之后页面换过文档，令牌一并作废（`forget_verification_token()`）。
+- **每页条数改不了**：实测传 `pageSize=50` 站点直接忽略，照样返回 10 条，别再试了。`ZUJUAN_API_PAGE_SIZE` 这个开关留着只为守住一件事 —— 只允许 0 或 `slicing.PAGE_SIZE`，填别的在 `start()` 里直接报错。`covered_pages` 里几十万条页码都是按 10 条一页记的，页大小一变这些进度全部失去意义（50 条一页的第 5 页和 10 条一页的第 5 页不是同一批题），断点续采会静默跳页或重复。换页大小是一次独立的数据迁移，不是一个开关。同理翻页硬顶 999 页 = 9990 道也是跟着页大小走的。
+- 空页重取（`_refetch_empty_page()`）一律走 `get_page_html`（api 模式下就是浏览器）而不是接口 —— 浏览器那一趟的结果是权威的。
+
 **浏览器翻页优先"点分页器"而不是直接 `goto` 深链接**（`ZUJUAN_HUMAN_PAGING`，默认开）。连续 `goto` 几百个 `/o2p387/` 深链接没有导航链、也不触发站点自己的翻页 JS，和真人翻页完全是两条路径；点 `a[data-type="switchPage"]` 才是站点期望的那条。整套还可以用 `ZUJUAN_FETCH_MODE = "browser"` 切成全程走浏览器（慢很多，但 httpx 的 TLS 指纹和 Chrome 不同，换 UA 也补不平这一层）。
 
 分页器真实结构见 `media_platform/zujuan/test_data/zujuan_pager.html`（2026-09 从线上取的），三个反直觉的点：**当前页是 `<a data-num="1" class="… active">`**（用 `data-num` 读页码，别解析文本）；**"下一页"是个没有文本的图标按钮** `<a title="下一页" data-type="nextPage">`，`:has-text("下一页")` 永远匹配不到；分页器 `data-cap="10"` 一次只显示 10 个页码，**要到远处的页只能用站点自带的跳转框** `#iptGotoNum` + `a[data-type="confirmGoto"]`（`_jump_via_input()`）。定位顺序：页码链接 → 下一页（仅相邻）→ 跳转框 → `goto`。

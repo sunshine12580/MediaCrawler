@@ -37,6 +37,7 @@ from var import crawler_type_var, source_keyword_var
 
 from store.zujuan import _progress as progress
 
+from . import api as zujuan_api
 from . import slicing
 from .client import ZuJuanClient, client_hints_from_page_data
 from .help import (
@@ -99,8 +100,33 @@ class ZuJuanCrawler(AbstractCrawler):
         # 人工翻页模式的待采队列，以及用来跳转的标签页
         self._watch_queue: List[WatchTarget] = []
         self._watch_nav_page = None
+        # api 模式：每片首页由浏览器取到的权威结果 {slice_key: (页码, 题目ID列表, 题数)}，
+        # 以及已经通过对齐校验的片。校验一旦失败就整轮关掉接口退回浏览器
+        self._api_probe: Dict[str, Tuple[int, List[str], Optional[int]]] = {}
+        self._api_verified: set = set()
+        self._api_enabled = True
+
+    @staticmethod
+    def _check_api_config() -> None:
+        """api 模式的参数体检，不合法直接报错而不是跑到一半写坏数据"""
+        page_size = int(getattr(config, "ZUJUAN_API_PAGE_SIZE", 0) or 0)
+        if page_size and page_size != slicing.PAGE_SIZE:
+            raise ValueError(
+                f"[ZuJuanCrawler] ZUJUAN_API_PAGE_SIZE={page_size} 不被支持。"
+                f"covered_pages 里几十万条进度都是按 {slicing.PAGE_SIZE} 条一页记的，"
+                f"页大小一变这些页码就全失去意义（{page_size} 条一页的第 5 页和 "
+                f"{slicing.PAGE_SIZE} 条一页的第 5 页不是同一批题），断点续采会静默跳页。"
+                f"换页大小是一次独立的数据迁移，不能只改这个开关"
+            )
+        page_base = int(getattr(config, "ZUJUAN_API_PAGE_BASE", 1) or 0)
+        if page_base not in (0, 1):
+            raise ValueError(
+                f"[ZuJuanCrawler] ZUJUAN_API_PAGE_BASE 只能是 0 或 1，当前是 {page_base}"
+            )
 
     async def start(self) -> None:
+        if self._api_mode():
+            self._check_api_config()
         playwright_proxy_format, httpx_proxy_format = None, None
         if config.ENABLE_IP_PROXY:
             self.ip_proxy_pool = await create_ip_pool(config.IP_PROXY_POOL_COUNT, enable_validate_ip=True)
@@ -330,13 +356,11 @@ class ZuJuanCrawler(AbstractCrawler):
 
             page_url = build_page_url(base_url, page, page_url_template)
             utils.logger.info(f"[ZuJuanCrawler] {label} 第 {page} 页: {page_url}")
-            page_html = await self.zujuan_client.get_page_html(
-                page_url, referer=base_url, page_no=page, base_url=base_url
+            page_html, total = await self._fetch_list_page(
+                target, parts, page, first_page, page_url, base_url
             )
             if page_url_template is None:
                 page_url_template = self._extractor.extract_page_url_template(page_html)
-
-            total = self._extractor.extract_site_total(page_html)
             if total is None:
                 # ★ 连"共计 N 道试题"都读不到 —— 正常列表页哪怕这一页没卡片这个数
                 #   也该在，读不到说明打开的多半不是列表页（被拦截/结构变了）。
@@ -453,6 +477,120 @@ class ZuJuanCrawler(AbstractCrawler):
                 f"{label} 第 {page} 页",
             )
 
+    async def _fetch_list_page(
+        self,
+        target: progress.KnowledgeTarget,
+        parts: Dict[str, str],
+        page: int,
+        first_page: int,
+        page_url: str,
+        base_url: str,
+    ) -> Tuple[str, Optional[int]]:
+        """取一页列表，返回 (卡片 HTML, 站点报的题数)。题数没读到一律返回 None。
+
+        api 模式下每一片的**首页仍然走浏览器** —— 那一趟本来就要做：过 WAF 挑战、
+        刷新 Cookie、读防伪令牌、读"共计 N 道试题"。之后的页才走接口。一片动辄
+        几百页，摊到每页的浏览器开销可以忽略，却把风控处置那一整套原样保留了下来。
+        """
+        key = slicing.slice_key(parts)
+        label = target.knowledge_id + (f"/{key}" if key else "")
+
+        if self._api_mode() and self._api_enabled and page > first_page:
+            if await self._api_aligned(target, parts, key, label, base_url):
+                result = await self.zujuan_client.fetch_list_api(
+                    target.knowledge_id,
+                    parts,
+                    page,
+                    referer=page_url,
+                    bank_id=str(getattr(config, "ZUJUAN_BANK_ID", "2") or "2"),
+                )
+                if result is not None:
+                    return result.html, result.total
+                # 接口这一趟没给出能认的结果 —— 退回浏览器把这一页重新取一遍，
+                # 绝不拿"没读到"当"这一页没题"
+                utils.logger.info(f"[ZuJuanCrawler] {label} 第 {page} 页改用浏览器重取")
+
+        page_html = await self.zujuan_client.get_page_html(
+            page_url, referer=base_url, page_no=page, base_url=base_url
+        )
+        total = self._extractor.extract_site_total(page_html)
+        if self._api_mode() and page == first_page:
+            # 记下这一页的权威结果，等第一次要用接口时拿它做对齐校验
+            self._api_probe[key] = (page, self._page_ids(page_html), total)
+        return page_html, total
+
+    @staticmethod
+    def _api_mode() -> bool:
+        return str(getattr(config, "ZUJUAN_FETCH_MODE", "hybrid") or "").lower() == "api"
+
+    @staticmethod
+    def _page_ids(page_html: str) -> List[str]:
+        return zujuan_api.question_ids(page_html)
+
+    async def _api_aligned(
+        self,
+        target: progress.KnowledgeTarget,
+        parts: Dict[str, str],
+        key: str,
+        label: str,
+        base_url: str,
+    ) -> bool:
+        """这一片第一次用接口之前，先确认接口和浏览器看到的是同一页。
+
+        ★ 这道校验是整个 api 模式能不能用的前提。页码基数（curPage 从 0 还是 1 数）
+          和筛选参数映射（quesType/quesDiff/quesYear 对应哪个码）猜错了都**不会报错**：
+          前者让每一页整体错位一页，后者让筛选条件被忽略、把整个知识点的题当成某个
+          分片入库。两种都是采得好好的、进度也照记，只有数据是错的。
+
+        校验方式是拿浏览器刚取到的那一页，用同一个页码再走一次接口，比题目 ID 列表
+        和题数。对不上就整轮关掉 api 模式退回浏览器 —— 慢，但不会写坏数据。
+        """
+        if key in self._api_verified:
+            return True
+        if not bool(getattr(config, "ZUJUAN_API_VERIFY_FIRST_PAGE", True)):
+            self._api_verified.add(key)
+            return True
+
+        probe = self._api_probe.get(key)
+        if probe is None:
+            # 没有可比的权威页（比如首页也是接口取的），不敢用
+            return False
+        probe_page, browser_ids, browser_total = probe
+        if not browser_ids:
+            # 浏览器那一页本身就没卡片，比不出什么，等下一片再校验
+            return False
+
+        result = await self.zujuan_client.fetch_list_api(
+            target.knowledge_id,
+            parts,
+            probe_page,
+            referer=base_url,
+            bank_id=str(getattr(config, "ZUJUAN_BANK_ID", "2") or "2"),
+        )
+        if result is None:
+            utils.logger.warning(f"[ZuJuanCrawler] {label} 接口对齐校验没拿到结果，本片继续走浏览器")
+            return False
+
+        api_ids = self._page_ids(result.html)
+        if api_ids == browser_ids and (browser_total is None or result.total == browser_total):
+            self._api_verified.add(key)
+            utils.logger.info(
+                f"[ZuJuanCrawler] {label} 接口对齐校验通过"
+                f"（第 {probe_page} 页 {len(api_ids)} 道，共 {result.total} 道），后续走接口"
+            )
+            return True
+
+        self._api_enabled = False
+        utils.logger.error(
+            f"[ZuJuanCrawler] ✗ {label} 接口对齐校验失败，本轮改回浏览器翻页。"
+            f"第 {probe_page} 页：浏览器 {len(browser_ids)} 道 / 接口 {len(api_ids)} 道，"
+            f"题数 浏览器 {browser_total} / 接口 {result.total}。"
+            f"浏览器前三个 ID {browser_ids[:3]}，接口前三个 {api_ids[:3]}。"
+            f"多半是 ZUJUAN_API_PAGE_BASE 填错（页码整体错位），"
+            f"或筛选参数映射不对（接口题数等于整个知识点的题数就是这种）"
+        )
+        return False
+
     async def _refetch_empty_page(
         self,
         label: str,
@@ -466,6 +604,9 @@ class ZuJuanCrawler(AbstractCrawler):
         读不到新的"共计 N 道"就沿用旧的 —— None 是"这一趟没读到"，不能拿它冲掉
         上一次读到的真实值，否则页数算不出来又会退回"翻到底了"的误判。
         """
+        # ★ 重取一律走 get_page_html（api 模式下就是浏览器）而不是接口：
+        #   浏览器那一趟的结果是权威的 —— 它带着真实指纹和完整会话，它都没看到题
+        #   又没有拦截特征，才敢说这一页真的没题
         questions: List[ZujuanQuestion] = []
         for attempt in range(1, EMPTY_PAGE_RETRY + 1):
             utils.logger.warning(

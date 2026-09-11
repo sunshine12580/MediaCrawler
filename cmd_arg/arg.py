@@ -349,6 +349,22 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 rich_help_panel="ZuJuan Configuration",
             ),
         ] = ",".join(config.ZUJUAN_EXCLUDE_PATHS or []),
+        fetch_mode: Annotated[
+            str,
+            typer.Option(
+                "--fetch_mode",
+                help="[zujuan] How to fetch list pages: hybrid | browser | api",
+                rich_help_panel="ZuJuan Configuration",
+            ),
+        ] = config.ZUJUAN_FETCH_MODE,
+        api_page_base: Annotated[
+            int,
+            typer.Option(
+                "--api_page_base",
+                help="[zujuan] api mode: does curPage count from 0 or 1",
+                rich_help_panel="ZuJuan Configuration",
+            ),
+        ] = config.ZUJUAN_API_PAGE_BASE,
     ) -> SimpleNamespace:
         """MediaCrawler 命令行入口"""
 
@@ -363,6 +379,8 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.ZUJUAN_EXCLUDE_PATHS = [
             item.strip() for item in (exclude_paths or "").split(",") if item.strip()
         ]
+        config.ZUJUAN_FETCH_MODE = (fetch_mode or "").strip().lower()
+        config.ZUJUAN_API_PAGE_BASE = api_page_base
 
         # Parse specified_id and creator_id into lists
         specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []

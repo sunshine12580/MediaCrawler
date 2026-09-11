@@ -28,6 +28,7 @@ from .exception import (
     DataFetchError,
     RateLimitError,
 )
+from . import api
 from .help import (
     ZUJUAN_HOST,
     PageStatus,
@@ -50,6 +51,26 @@ CHROME_VERSION_RE = re.compile(r"Chrome/(\d+)")
 
 # 点击翻页后等内容真的换掉的最长秒数
 CLICK_PAGING_TIMEOUT_SEC = 20
+
+# 列表接口一次请求的最长秒数。它只回 9 KB 左右，比整页快得多，超时给短一点
+API_TIMEOUT_SEC = 20
+
+# 在页面里找防伪令牌。ASP.NET Core 的这半令牌可能渲染成隐藏 input、meta，
+# 也可能挂在全局变量上，按常见程度依次找；都找不到返回 null，由调用方退回浏览器
+_VERIFICATION_TOKEN_JS = """() => {
+  const input = document.querySelector('input[name="__RequestVerificationToken"]');
+  if (input && input.value) return input.value;
+  const meta = document.querySelector(
+    'meta[name="__RequestVerificationToken"], meta[name="RequestVerification"], meta[name="csrf-token"]'
+  );
+  if (meta && meta.content) return meta.content;
+  for (const key of ["__RequestVerificationToken", "requestVerificationToken",
+                     "RequestVerificationToken", "csrfToken"]) {
+    const value = window[key];
+    if (typeof value === "string" && value) return value;
+  }
+  return null;
+}"""
 
 # goto 之后等题目卡片进 DOM 的最长毫秒数。
 # ★ domcontentloaded 只保证 HTML 骨架到位，题目列表是随后由 JS 填进去的；
@@ -191,6 +212,10 @@ class ZuJuanClient(AbstractApiClient, ProxyRefreshMixin):
         self._browser_base_url: Optional[str] = None
         self._browser_page_no: Optional[int] = None
         self._pager_dumped = False
+
+        # api 模式：ASP.NET Core 的防伪令牌。★ 它和同名 Cookie 不是一个值
+        #（两者是密码学配对的两半），只能从页面里读，读不到就不许走接口
+        self._verification_token: Optional[str] = None
 
     # ------------------------------------------------------------------
     # httpx 客户端与 Cookie
@@ -428,6 +453,128 @@ class ZuJuanClient(AbstractApiClient, ProxyRefreshMixin):
         page_html = await self.playwright_page.content()
         self._remember_position(page_html, url, page_no, base_url)
         return page_html
+
+    # ------------------------------------------------------------------
+    # api 模式：直接打站点自己的列表接口
+    # ------------------------------------------------------------------
+
+    async def read_verification_token(self) -> Optional[str]:
+        """从当前页面里读 ASP.NET Core 的防伪令牌，读不到返回 None。
+
+        ★ 不能拿同名 Cookie 顶替：``__RequestVerificationToken`` Cookie 和请求头
+          里的 ``RequestVerification`` 是密码学配对的两半，值不一样，用 Cookie
+          那半去发请求会被判成伪造。
+        ★ 读不到时必须返回 None 让上层退回浏览器翻页，不能瞎猜一个 ——
+          令牌不对的表现是接口返回一段 HTML 而不是 JSON，正好会被
+          ``api.parse_response()`` 判成"这一趟没读到"，但那样每页都白跑一次。
+        """
+        if not self.playwright_page:
+            return None
+        try:
+            token = await self.playwright_page.evaluate(_VERIFICATION_TOKEN_JS)
+        except Exception as e:  # noqa: BLE001 - 页面正在跳转时取不到属正常
+            utils.logger.warning(f"[ZuJuanClient.read_verification_token] 读取失败: {e}")
+            return None
+        token = (token or "").strip() if isinstance(token, str) else ""
+        if not token:
+            return None
+        self._verification_token = token
+        return token
+
+    def forget_verification_token(self) -> None:
+        """令牌失效了（换页面/过完验证），下次用接口前重新读一次"""
+        self._verification_token = None
+
+    async def fetch_list_api(
+        self,
+        knowledge_id: str,
+        parts: Dict[str, str],
+        page: int,
+        referer: str,
+        bank_id: str = "2",
+    ) -> Optional["api.ApiListPage"]:
+        """POST 列表接口取一页，返回 (卡片 HTML 片段, 站点报的题数)。
+
+        ★ 任何一步不确定都返回 None —— 上层会退回浏览器把这一页重新取一遍。
+          这里绝不能把"没读到"伪装成"这一页没题"，那会让知识点被标成采完。
+        """
+        token = self._verification_token or await self.read_verification_token()
+        if not token:
+            utils.logger.warning(
+                "[ZuJuanClient.fetch_list_api] 页面里找不到 __RequestVerificationToken，"
+                "这一页退回浏览器"
+            )
+            return None
+
+        payload = api.build_payload(
+            knowledge_id,
+            parts,
+            page,
+            bank_id=bank_id,
+            page_base=int(getattr(config, "ZUJUAN_API_PAGE_BASE", 1) or 0),
+        )
+        page_size = int(getattr(config, "ZUJUAN_API_PAGE_SIZE", 0) or 0)
+        if page_size:
+            payload["pageSize"] = str(page_size)
+
+        headers = {
+            k: v
+            for k, v in self.headers.items()
+            # Cookie 交给 jar；下面这几个是"取文档"的头，XHR 要换成另一套
+            if k.lower() not in ("cookie", "accept", "sec-fetch-dest", "sec-fetch-mode",
+                                 "sec-fetch-user", "upgrade-insecure-requests", "referer")
+        }
+        headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": self._host,
+            "Referer": referer or self._host,
+            "RequestVerification": token,
+            "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        })
+
+        await self._refresh_proxy_if_expired()
+        client = await self._get_client()
+        try:
+            response = await client.post(
+                self._host + api.API_PATH,
+                data=payload,
+                headers=headers,
+                timeout=API_TIMEOUT_SEC,
+            )
+        except Exception as e:  # noqa: BLE001 - 网络抖动交给上层退回浏览器
+            utils.logger.warning(f"[ZuJuanClient.fetch_list_api] 请求失败({e})，退回浏览器")
+            return None
+
+        if response.status_code == 429:
+            raise RateLimitError(
+                f"[ZuJuanClient.fetch_list_api] rate limited by HTTP 429, page: {page}"
+            )
+        if response.status_code != 200:
+            utils.logger.warning(
+                f"[ZuJuanClient.fetch_list_api] HTTP {response.status_code}，退回浏览器"
+            )
+            return None
+
+        # 被 WAF 拦下时这里拿到的是 HTML 而不是 JSON。先按风控层级判一次，
+        # 该等人拖滑块的还是要等，不能当成"接口没返回结果"悄悄跳过
+        if page_status(response.text) is PageStatus.CAPTCHA:
+            raise CaptchaPageError(
+                f"[ZuJuanClient.fetch_list_api] hit WAF captcha page, page: {page}"
+            )
+
+        result = api.parse_response(response.text)
+        if result is None:
+            # 令牌过期也长这样，丢掉它下次重新读
+            self.forget_verification_token()
+            utils.logger.warning(
+                f"[ZuJuanClient.fetch_list_api] 第 {page} 页返回认不出来"
+                f"（前 120 字: {response.text[:120]!r}），退回浏览器"
+            )
+        return result
 
     async def _wait_for_list_rendered(self) -> None:
         """等题目卡片真的进了 DOM 再读 HTML。
@@ -669,6 +816,8 @@ class ZuJuanClient(AbstractApiClient, ProxyRefreshMixin):
                 # 过验证过程中页面跳转过，浏览器停在哪已经不可信了
                 self._browser_base_url = None
                 self._browser_page_no = None
+                # 验证页换过一次文档，手里那半防伪令牌多半也作废了
+                self.forget_verification_token()
                 return page_html
 
         raise DataFetchError(f"[ZuJuanClient.wait_human_solve] 人机验证等待超时（{timeout}s）: {url}")
